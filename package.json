@@ -1,0 +1,18 @@
+{
+  "name": "chat-tcp",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev:tcp:server": "node tcp/server.js",
+    "dev:tcp:client": "node tcp/client.js",
+    "dev:ws": "node ws/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^13.0.0",
+    "winston": "^3.18.3",
+    "ws": "^8.18.3"
+  }
+}
