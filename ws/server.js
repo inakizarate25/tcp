@@ -4,30 +4,61 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
+import fs from "fs";
 import { logger } from "./logger.js";
+import { initDB } from "./db.js";
 
-// --- Configuración base ---
+// --- Inicializar Express y DB ---
 const app = express();
 app.use(express.json());
+const db = await initDB();
 
-// Usuarios simulados (pueden venir de una base o archivo)
-const USERS = new Map([
-  ["alice", { password: "alice123" }],
-  ["bob", { password: "bob123" }],
-]);
+// --- Persistencia de mensajes (como antes) ---
+const DATA_FILE = "./data/messages.json";
+let messages = [];
+if (fs.existsSync(DATA_FILE)) {
+  messages = JSON.parse(fs.readFileSync(DATA_FILE, "utf8") || "[]");
+}
+function saveMessage(msg) {
+  messages.push(msg);
+  fs.writeFileSync(DATA_FILE, JSON.stringify(messages, null, 2));
+}
 
-// --- Endpoint de autenticación ---
-app.post("/login", (req, res) => {
+// --- REGISTRO DE USUARIO ---
+app.post("/register", async (req, res) => {
   const { username, password } = req.body;
+  if (!username || !password)
+    return res.status(400).json({ error: "Faltan datos" });
 
-  // Validación
-  const user = USERS.get(username);
+  try {
+    await db.run("INSERT INTO users (username, password) VALUES (?, ?)", [
+      username,
+      password,
+    ]);
+    logger.info("REGISTER_OK", { username });
+    res.json({ message: "Usuario registrado correctamente" });
+  } catch (err) {
+    logger.error("REGISTER_FAIL", { username, error: err.message });
+    if (err.message.includes("UNIQUE"))
+      return res.status(400).json({ error: "Usuario ya existe" });
+    res.status(500).json({ error: "Error interno" });
+  }
+});
+
+// --- LOGIN DE USUARIO ---
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password)
+    return res.status(400).json({ error: "Faltan datos" });
+
+  const user = await db.get("SELECT * FROM users WHERE username = ?", [
+    username,
+  ]);
   if (!user || user.password !== password) {
     logger.warn("LOGIN_FAIL", { username });
     return res.status(401).json({ error: "Credenciales inválidas" });
   }
 
-  // Crear token JWT válido por 2 horas
   const token = jwt.sign({ sub: username }, process.env.JWT_SECRET, {
     expiresIn: "2h",
   });
@@ -38,14 +69,12 @@ app.post("/login", (req, res) => {
 // --- Servir el cliente web ---
 app.use(express.static("public"));
 
-// --- Crear servidor HTTP + WS ---
+// --- Configuración WebSocket ---
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
-
-// --- Mapa de clientes conectados ---
 const clients = new Map();
 
-// --- Validar token antes de aceptar la conexión WS ---
+// --- Autenticación antes del upgrade ---
 server.on("upgrade", (req, socket, head) => {
   const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
   const token = params.get("token");
@@ -69,19 +98,30 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-// --- Evento de conexión WS ---
+// --- Nueva conexión WebSocket ---
 wss.on("connection", (ws, req) => {
-  const id = uuid();
   const username = req.user.username;
-  clients.set(ws, { id, username });
+  clients.set(ws, { username });
 
   logger.info("WS_CONNECT", { username });
   broadcast({ type: "system", text: `${username} se unió al chat.` });
 
+  // Enviar historial solo al nuevo usuario
+  ws.send(JSON.stringify({ type: "history", messages }));
+
   ws.on("message", (data) => {
-    const msg = data.toString();
-    logger.info("WS_MSG", { from: username, text: msg });
-    broadcast({ type: "chat", from: username, text: msg });
+    const text = data.toString().trim();
+    if (!text) return;
+
+    const msg = {
+      type: "chat",
+      from: username,
+      text,
+      ts: new Date().toISOString(),
+    };
+    saveMessage(msg);
+    logger.info("WS_MSG", msg);
+    broadcast(msg);
   });
 
   ws.on("close", () => {
@@ -106,5 +146,7 @@ function broadcast(obj) {
 // --- Iniciar servidor ---
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(`Servidor WebSocket+JWT en http://localhost:${PORT}`);
+  console.log(
+    `Servidor con registro/login JWT+SQLite en http://localhost:${PORT}`
+  );
 });
